@@ -33,7 +33,7 @@ def main() -> None:
 
     store = KVStore()
     app = create_app(store, cfg)
-    app.run(host=cfg.host, port=cfg.port, debug=True)
+    app.run(host=cfg.host, port=cfg.port, debug=False)
 
 
 if __name__ == "__main__":
