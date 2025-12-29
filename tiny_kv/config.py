@@ -10,5 +10,5 @@ class NodeConfig:
     role: str  # "primary" or "replica"
     host: str
     port: int
-    peers: List[str]  # list of base URLs like ["http://127.0.0.1:5002", ...]
+    peers: List[str]  # base URLs like ["http://127.0.0.1:5002", ...]
     timeout_s: float = 0.8
