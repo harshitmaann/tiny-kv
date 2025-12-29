@@ -23,8 +23,8 @@ class KVStore:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._data: Dict[str, Record] = {}          # live records only
-        self._tomb: Dict[str, int] = {}             # key -> deleted version
+        self._data: Dict[str, Record] = {}  # live records only
+        self._tomb: Dict[str, int] = {}     # key -> deleted version
 
     def _max_known_version(self, key: str) -> int:
         live_v = self._data[key].version if key in self._data else 0
@@ -40,7 +40,6 @@ class KVStore:
             next_version = self._max_known_version(key) + 1
             rec = Record(value=value, version=next_version, deleted=False)
             self._data[key] = rec
-            # if a tombstone exists at lower version, keep it (harmless); if higher, put would have version > it anyway
             return rec
 
     def delete(self, key: str) -> Tuple[bool, int]:
@@ -55,9 +54,12 @@ class KVStore:
             self._tomb[key] = delete_version
             return existed, delete_version
 
-    def upsert_if_newer(self, key: str, value: Optional[str], version: int, deleted: bool) -> Tuple[bool, Optional[Record]]:
+    def upsert_if_newer(
+        self, key: str, value: Optional[str], version: int, deleted: bool
+    ) -> Tuple[bool, Optional[Record]]:
         """
         Replica helper: apply incoming change only if version is newer than local knowledge.
+        Returns (applied, resulting_record_or_none).
         """
         with self._lock:
             known = self._max_known_version(key)
@@ -69,7 +71,40 @@ class KVStore:
                 self._tomb[key] = version
                 return True, None
 
-            # normal write
             rec = Record(value=value, version=version, deleted=False)
             self._data[key] = rec
             return True, rec
+
+    def dump_state(self) -> dict:
+        """Return a JSON-serializable snapshot of live data + tombstones."""
+        with self._lock:
+            data = {
+                k: {"value": v.value, "version": v.version}
+                for k, v in self._data.items()
+            }
+            tomb = dict(self._tomb)
+            return {"data": data, "tomb": tomb}
+
+    def apply_state(self, snapshot: dict) -> None:
+        """Merge a snapshot into local state using version rules."""
+        data = snapshot.get("data", {}) or {}
+        tomb = snapshot.get("tomb", {}) or {}
+
+        with self._lock:
+            # Apply tombstones first
+            for k, v in tomb.items():
+                if isinstance(v, int):
+                    known = self._max_known_version(k)
+                    if v > known:
+                        self._data.pop(k, None)
+                        self._tomb[k] = v
+
+            # Apply live records
+            for k, rec in data.items():
+                if not isinstance(rec, dict):
+                    continue
+                value = rec.get("value")
+                version = rec.get("version")
+                if isinstance(value, str) and isinstance(version, int):
+                    # Use replica rule so version comparisons stay correct
+                    self.upsert_if_newer(k, value=value, version=version, deleted=False)

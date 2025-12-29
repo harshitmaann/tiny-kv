@@ -28,7 +28,6 @@ def create_app(store: KVStore, cfg: NodeConfig) -> Flask:
         if value is None or not isinstance(value, str):
             return jsonify({"error": "value_required", "hint": "JSON body like {'value': '...'}"}), 400
 
-        # Replicas accept only internal replication writes
         if cfg.role != "primary":
             return jsonify({"error": "read_only_replica", "hint": "send writes to primary"}), 403
 
@@ -36,10 +35,27 @@ def create_app(store: KVStore, cfg: NodeConfig) -> Flask:
 
         rep = replicate_to_peers(cfg, key=key, value=rec.value, version=rec.version, deleted=False)
         if rep.acks < rep.required:
-            # In real systems you might roll back, but for learning we surface the failure.
-            return jsonify({"error": "quorum_failed", "acks": rep.acks, "required": rep.required, "peer_errors": rep.errors}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "quorum_failed",
+                        "acks": rep.acks,
+                        "required": rep.required,
+                        "peer_errors": rep.errors,
+                    }
+                ),
+                503,
+            )
 
-        return jsonify({"key": key, "value": rec.value, "version": rec.version, "acks": rep.acks, "required": rep.required})
+        return jsonify(
+            {
+                "key": key,
+                "value": rec.value,
+                "version": rec.version,
+                "acks": rep.acks,
+                "required": rep.required,
+            }
+        )
 
     @app.delete("/kv/<key>")
     def delete_key(key: str):
@@ -50,13 +66,28 @@ def create_app(store: KVStore, cfg: NodeConfig) -> Flask:
 
         rep = replicate_to_peers(cfg, key=key, value=None, version=del_version, deleted=True)
         if rep.acks < rep.required:
-            return jsonify({"error": "quorum_failed", "acks": rep.acks, "required": rep.required, "peer_errors": rep.errors}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "quorum_failed",
+                        "acks": rep.acks,
+                        "required": rep.required,
+                        "peer_errors": rep.errors,
+                    }
+                ),
+                503,
+            )
 
-        if not existed:
-            # still returns 200 because delete is now replicated and versioned
-            return jsonify({"key": key, "deleted": True, "existed": False, "version": del_version, "acks": rep.acks, "required": rep.required})
-
-        return jsonify({"key": key, "deleted": True, "existed": True, "version": del_version, "acks": rep.acks, "required": rep.required})
+        return jsonify(
+            {
+                "key": key,
+                "deleted": True,
+                "existed": existed,
+                "version": del_version,
+                "acks": rep.acks,
+                "required": rep.required,
+            }
+        )
 
     # Internal endpoint used by primary to replicate writes/deletes to replicas
     @app.post("/internal/replica/kv/<key>")
@@ -82,5 +113,19 @@ def create_app(store: KVStore, cfg: NodeConfig) -> Flask:
                 "version": rec.version if rec else version,
             }
         )
+
+    # Primary provides snapshot for recovering replicas
+    @app.get("/internal/sync")
+    def sync_dump():
+        if cfg.role != "primary":
+            return jsonify({"error": "not_primary"}), 403
+        return jsonify(store.dump_state())
+
+    # Any node can receive/apply a snapshot
+    @app.post("/internal/sync/apply")
+    def sync_apply():
+        snap = request.get_json(silent=True) or {}
+        store.apply_state(snap)
+        return jsonify({"applied": True})
 
     return app
